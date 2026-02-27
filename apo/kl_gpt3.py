@@ -111,7 +111,7 @@ class GPT3(LanguageModel):
                         echo=True,
                         max_tokens=self.max_tokens
                     )
-                except openai.error.RateLimitError as exc:
+                except (openai.RateLimitError, Exception) as exc:
                     sleep(30)
                     print(f'Sleeping because of rate limit error: {exc}')
                 else:

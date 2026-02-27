@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from transformers import Trainer, PreTrainedModel, PreTrainedTokenizer
 from transformers.modelcard import TrainingSummary
-import wandb
+import comet_ml
 
 from .metrics import Metric
 from .scorers import Scorer
@@ -31,7 +31,8 @@ class CustomObjectiveTrainer(Trainer):
         self,
         model: PreTrainedModel,
         inputs: dict[str, Any],
-        return_outputs: bool = False
+        return_outputs: bool = False,
+        num_items_in_batch: int = None,
     ) -> torch.Tensor:
         microbatch_size = inputs.input_ids.numel()
         batch_size = inputs.input_ids.size(0)
@@ -100,7 +101,7 @@ class CustomObjectiveTrainer(Trainer):
                 self.log(logs)
         return (loss, outputs) if return_outputs else loss
 
-    def log(self, logs: dict[str, float]) -> None:
+    def log(self, logs: dict[str, float], start_time: float = None) -> None:
         if self.state.epoch is not None:
             logs["epoch"] = round(self.state.epoch, 2)
         output = {
@@ -128,7 +129,8 @@ class CustomObjectiveTrainer(Trainer):
 
     def _push_from_checkpoint(self, checkpoint_folder: str) -> None:
         super()._push_from_checkpoint(checkpoint_folder)
-        self.repo.add_tag(tag_name=str(self.state.tokens_seen))
+        if hasattr(self, 'repo') and self.repo is not None:
+            self.repo.add_tag(tag_name=str(self.state.tokens_seen))
 
     def create_model_card(
         self,
@@ -160,10 +162,13 @@ class CustomObjectiveTrainer(Trainer):
         training_summary.finetuned_from = None
         model_card = training_summary.to_model_card()
         model_card += '\n\n# Full config\n' + pformat(kwargs.get('full_config'))
-        model_card += '\n\n# Wandb URL:\n' + wandb.run.url
+        experiment = comet_ml.get_running_experiment()
+        if experiment and hasattr(experiment, 'url') and experiment.url:
+            model_card += '\n\n# Comet ML URL:\n' + experiment.url
         with open(os.path.join(self.args.output_dir, "README.md"), "w") as f:
             f.write(model_card)
-        self.repo.push_to_hub(commit_message="update model card README.md", auto_lfs_prune=True)
+        if hasattr(self, 'repo') and self.repo is not None:
+            self.repo.push_to_hub(commit_message="update model card README.md", auto_lfs_prune=True)
 
 
 class ModelInputInspector:
@@ -195,10 +200,15 @@ class ModelInputInspector:
     ) -> dict[str, Any]:
         segments = self.get_segments(inputs)
         scores = [self.scorer.score_text(text) for text in segments]
-        segment_table = wandb.Table(columns=['segment', 'score'], data=list(zip(segments, scores)))
+        experiment = comet_ml.get_running_experiment()
+        if experiment:
+            experiment.log_table(
+                'debugging_segments.csv',
+                tabular_data=list(zip(segments, scores)),
+                headers=['segment', 'score']
+            )
         raw_text = self.tokenizer.batch_decode(inputs['input_ids'])
         logs = {
-            f'debugging/segments': segment_table,
             f'debugging/score': np.mean(scores),
             f'debugging/score_std': np.std(scores),
             f'debugging/num_segments': len(segments),
@@ -208,13 +218,20 @@ class ModelInputInspector:
             logs['debugging/raw_token_scores_std'] = token_scores.std()
             neg_scores = (-token_scores).reshape_as(inputs.input_ids).tolist()
             values = values.reshape_as(inputs.input_ids).tolist()
-            logs['debugging/raw_text'] = wandb.Table(
-                columns=['raw batch text', '-scores', 'values'],
-                data=[(text, ' '.join(f'{s:.2f}' for s in score), ' '.join(f'{v:.2f}' for v in value))
-                      for text, score, value in zip(raw_text, neg_scores, values)]
-            )
+            if experiment:
+                experiment.log_table(
+                    'debugging_raw_text.csv',
+                    tabular_data=[(text, ' '.join(f'{s:.2f}' for s in score), ' '.join(f'{v:.2f}' for v in value))
+                                  for text, score, value in zip(raw_text, neg_scores, values)],
+                    headers=['raw batch text', '-scores', 'values']
+                )
         else:
-            logs['debugging/raw_text'] = wandb.Table(columns=['raw batch text'], data=[(text,) for text in raw_text])
+            if experiment:
+                experiment.log_table(
+                    'debugging_raw_text.csv',
+                    tabular_data=[(text,) for text in raw_text],
+                    headers=['raw batch text']
+                )
 
         for metric in self.metrics:
             metric_logs = {f'debugging/{name}': value for name, value in metric.score_texts(texts=segments).items()}

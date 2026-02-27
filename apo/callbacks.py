@@ -3,13 +3,13 @@ from dataclasses import dataclass, field
 from random import choices
 import time
 import os
+import logging
 
 import numpy as np
 import srsly
-import wandb
+import comet_ml
 from transformers import TrainerCallback, PreTrainedModel, PreTrainedTokenizer, TrainingArguments, TrainerState, \
     TrainerControl
-from transformers.integrations import WandbCallback
 from .kl_gpt3 import evaluate_forward_kl
 
 from .scorers import Scorer, LMSamples
@@ -72,7 +72,7 @@ class CustomCallback(TrainerCallback):
     def __init__(self, *args, **kwargs):
         self.every_n_steps = kwargs.pop('every_n_steps', 1000)
         self.run_on_train_end = kwargs.pop('run_on_train_end', True)
-        self.run_on_train_start = kwargs.pop('run_on_train_end', True)
+        self.run_on_train_start = kwargs.pop('run_on_train_start', True)
         self.force_call_on = kwargs.pop('force_call_on', [])
 
     def on_train_begin(
@@ -80,10 +80,12 @@ class CustomCallback(TrainerCallback):
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
-        model: PreTrainedModel,
-        tokenizer: PreTrainedTokenizer,
+        model: PreTrainedModel = None,
+        tokenizer: PreTrainedTokenizer = None,
         **kwargs
     ):
+        model = model or kwargs.get('model')
+        tokenizer = tokenizer or kwargs.get('processing_class') or kwargs.get('tokenizer')
         if self.run_on_train_start:
             self.run(args, state, control, model, tokenizer, **kwargs)
 
@@ -92,10 +94,12 @@ class CustomCallback(TrainerCallback):
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
-        model: PreTrainedModel,
-        tokenizer: PreTrainedTokenizer,
+        model: PreTrainedModel = None,
+        tokenizer: PreTrainedTokenizer = None,
         **kwargs
     ):
+        model = model or kwargs.get('model')
+        tokenizer = tokenizer or kwargs.get('processing_class') or kwargs.get('tokenizer')
         if state.global_step % self.every_n_steps == 0 or state.global_step in self.force_call_on:
             self.run(args, state, control, model, tokenizer, **kwargs)
 
@@ -104,10 +108,12 @@ class CustomCallback(TrainerCallback):
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
-        model: PreTrainedModel,
-        tokenizer: PreTrainedTokenizer,
+        model: PreTrainedModel = None,
+        tokenizer: PreTrainedTokenizer = None,
         **kwargs
     ):
+        model = model or kwargs.get('model')
+        tokenizer = tokenizer or kwargs.get('processing_class') or kwargs.get('tokenizer')
         if self.run_on_train_end:
             self.run(args, state, control, model, tokenizer, **kwargs)
 
@@ -132,7 +138,13 @@ class SetupCallback(TrainerCallback):
             **kwargs
     ):
         assert not hasattr(state, 'tokens_seen')
-        tokens_already_seen = kwargs.get('train_dataloader').dataset.datapipe.skip_tokens
+        train_dataloader = kwargs.get('train_dataloader')
+        if train_dataloader is not None and hasattr(train_dataloader, 'dataset'):
+            dataset = train_dataloader.dataset
+            datapipe = getattr(dataset, 'datapipe', dataset)
+            tokens_already_seen = getattr(datapipe, 'skip_tokens', 0)
+        else:
+            tokens_already_seen = 0
         if len(state.log_history) > 0:
             assert tokens_already_seen > 0
             state.tokens_seen = state.log_history[-1]['tokens_seen']
@@ -144,7 +156,7 @@ class SetupCallback(TrainerCallback):
 
 class GenerateAndScoreCallback(CustomCallback):
     """
-    A callback that generates samples from the model, scores them, and logs samples and scores to wandb
+    A callback that generates samples from the model, scores them, and logs samples and scores to Comet ML
     """
 
     def __init__(self, scorer: Scorer, scenarios: list[GenerationScenario], metrics: list[Metric], *args, **kwargs):
@@ -153,11 +165,10 @@ class GenerateAndScoreCallback(CustomCallback):
         self.scenarios = scenarios
         self.metrics = metrics
         self.batch_size = kwargs.pop('batch_size', 512)
-        self.all_samples: dict[str, wandb.Table] = {}
+        self._all_samples_columns = ['step', 'prompt', 'continuation', 'score']
+        self.all_samples: dict[str, list] = {}
         for scenario in self.scenarios:
-            self.all_samples[f'generation/{scenario.name}/all_samples'] = wandb.Table(
-                columns=['step', 'prompt', 'continuation', 'score']
-            )
+            self.all_samples[f'generation/{scenario.name}/all_samples'] = []
 
     def run(
         self,
@@ -185,12 +196,15 @@ class GenerateAndScoreCallback(CustomCallback):
                       f'{scenario.num_samples // self.batch_size}')
                 samples += self.generate_and_score_for_scenario(model, tokenizer, scenario, num_samples=self.batch_size)
             prefix = f'generation/{scenario.name}'
-            table = wandb.Table(
-                columns=samples.column_names,
-                data=list(samples if not scenario.display_as_html else samples.display_as_html())[:512]
-            )
+            experiment = comet_ml.get_running_experiment()
+            if experiment:
+                table_data = list(samples if not scenario.display_as_html else samples.display_as_html())[:512]
+                experiment.log_table(
+                    f'{prefix}_current_samples.csv',
+                    tabular_data=table_data,
+                    headers=samples.column_names
+                )
             logs = {
-                f'{prefix}/current_samples': table,
                 f'{prefix}/score': np.mean(samples.scores),
                 f'{prefix}/score_max': np.max(samples.scores),
                 f'{prefix}/score_max@25': get_max_at_k(samples.scores, k=25),
@@ -203,8 +217,9 @@ class GenerateAndScoreCallback(CustomCallback):
                     for name, value in metric.score_texts(texts=samples.continuations).items()
                 })
             for sample_data in samples:
-                self.all_samples[f'{prefix}/all_samples'].add_data(step, *sample_data)
-            wandb.log(logs)
+                self.all_samples[f'{prefix}/all_samples'].append([step] + list(sample_data))
+            if experiment:
+                experiment.log_metrics(logs, step=step)
             all_logs.update(logs)
         return all_logs
 
@@ -217,7 +232,14 @@ class GenerateAndScoreCallback(CustomCallback):
         tokenizer: PreTrainedTokenizer,
         **kwargs
     ):
-        wandb.log(self.all_samples)
+        experiment = comet_ml.get_running_experiment()
+        if experiment:
+            for table_name, table_data in self.all_samples.items():
+                experiment.log_table(
+                    f'{table_name.replace("/", "_")}.csv',
+                    tabular_data=table_data,
+                    headers=self._all_samples_columns
+                )
 
     def generate_and_score_for_scenario(
         self,
@@ -292,10 +314,13 @@ class KLGPT3Callback(CustomCallback):
         self.should_insert_prefix = should_insert_prefix
         self.gpt3_kwargs = kwargs.get('gpt3_kwargs', {})
         if os.environ.get('OPENAI_API_KEY') is None:
-            raise RuntimeError(
-                'GenerateAndScoreCallback requires you to set OPENAI_API_KEY env variable. To obtain a token, go to '
-                'https://beta.openai.com/account/api-keys'
+            logging.warning(
+                'OPENAI_API_KEY not set — KLGPT3Callback will be disabled. '
+                'Set the env var to enable KL-GPT3 evaluation.'
             )
+            self._disabled = True
+        else:
+            self._disabled = False
 
     def run(
         self,
@@ -306,6 +331,8 @@ class KLGPT3Callback(CustomCallback):
         tokenizer: PreTrainedTokenizer,
         **kwargs
     ):
+        if self._disabled:
+            return
         was_in_training = model.training
         original_padding_side = tokenizer.padding_side
         model.eval()
@@ -319,33 +346,39 @@ class KLGPT3Callback(CustomCallback):
             should_insert_prefix=self.should_insert_prefix,
             gpt3_kwargs=self.gpt3_kwargs,
         )
-        wandb.log({'KL/KL(GPT3, model)': forward_kl})
+        experiment = comet_ml.get_running_experiment()
+        if experiment:
+            experiment.log_metric('KL/KL(GPT3, model)', forward_kl)
         print(({'KL/KL(GPT3, model)': forward_kl}))
         model.training = was_in_training
         tokenizer.padding_side = original_padding_side
 
 
-class CustomWandbCallback(WandbCallback):
-    """A thin wrapper around WandbCallback to disable logging gradients and storing model/trainer configs (we do that
-    elsewhere more cleanly)"""
+class CustomCometCallback(TrainerCallback):
+    """A custom callback that logs training metrics to Comet ML."""
+
+    def __init__(self):
+        self._initialized = False
 
     def setup(self, args, state, model, **kwargs):
         self._initialized = True
-        if state.is_world_process_zero:
-            wandb.define_metric("train/tokens_seen")
-            wandb.define_metric("*", step_metric="train/tokens_seen")
-            wandb.define_metric("objective/eval/*", step_metric="objective/eval/tokens_seen_during_eval")
-            wandb.log({'train/tokens_seen': state.tokens_seen})
+        experiment = comet_ml.get_running_experiment()
+        if experiment and state.is_world_process_zero:
+            experiment.log_metric('train/tokens_seen', state.tokens_seen, step=state.global_step)
 
     def on_log(self, args, state, control, model=None, logs=None, **kwargs):
         if not self._initialized:
             self.setup(args, state, model)
         if control.should_training_stop:
             return
-        if state.is_world_process_zero:
+        experiment = comet_ml.get_running_experiment()
+        if experiment and state.is_world_process_zero:
             logs = {self._rename_key(k): v for k, v in logs.items()}
             logs['train/tokens_seen'] = state.tokens_seen
-            self._wandb.log({**logs, "train/global_step": state.global_step})
+            logs['train/global_step'] = state.global_step
+            # Only log scalar values to Comet
+            scalar_logs = {k: v for k, v in logs.items() if isinstance(v, (int, float))}
+            experiment.log_metrics(scalar_logs, step=state.global_step)
 
     def _rename_key(self, key):
         key = key.replace('train_', 'train/', 1).replace('eval_', 'eval/', 1)

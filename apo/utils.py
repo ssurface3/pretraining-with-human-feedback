@@ -8,7 +8,7 @@ from contextlib import contextmanager
 
 import torch
 from datasets import Dataset
-from transformers.generation_logits_process import LogitsProcessor
+from transformers.generation.logits_process import LogitsProcessor
 import numpy as np
 
 

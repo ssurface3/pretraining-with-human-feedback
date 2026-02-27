@@ -4,14 +4,14 @@ import argparse
 
 import torch
 from transformers import AutoConfig, AutoTokenizer, TrainingArguments, PreTrainedModel, PreTrainedTokenizer, set_seed
-import wandb
+import comet_ml
 import yaml
 
 from apo.dataset_wrappers import ConstantLengthDataset
 from apo.trainer import CustomObjectiveTrainer, ModelInputInspector
 from apo.objectives import Objective
 from apo.models import GPT2LMAndValueHeadModel
-from apo.callbacks import GenerateAndScoreCallback, GenerationScenario, CustomWandbCallback, KLGPT3Callback, SetupCallback
+from apo.callbacks import GenerateAndScoreCallback, GenerationScenario, CustomCometCallback, KLGPT3Callback, SetupCallback
 from apo.scorers import Scorer
 from apo.metrics import Metric
 from apo.utils import override_config, unflatten_config, merge_configs
@@ -64,9 +64,10 @@ def prepare_trainer_arguments(**kwargs) -> TrainingArguments:
     num_tokens = kwargs.pop('num_tokens', None)
     effective_batch_size = kwargs.pop('effective_batch_size', None)
     tokens_already_seen = kwargs.pop('tokens_already_seen', 0)
+    explicit_max_steps = kwargs.get('max_steps')  # capture before TrainingArguments consumes it
     args = TrainingArguments(report_to=['none'], **kwargs)
     if effective_batch_size:
-        if args.local_rank == -1:
+        if args.world_size <= 1:
             instantaneous_bsz = (args.per_device_train_batch_size * args.world_size * args.n_gpu)
             args.gradient_accumulation_steps = int(effective_batch_size // instantaneous_bsz)
             print(f'setting gradient_accumulation_steps={args.gradient_accumulation_steps} based on '
@@ -78,9 +79,13 @@ def prepare_trainer_arguments(**kwargs) -> TrainingArguments:
             raise ValueError('effective_batch_size is not compatible with DDP')
     if num_tokens:
         num_tokens -= tokens_already_seen
-        args.max_steps = int(num_tokens // (effective_batch_size * args.world_size * 1024))
-        print(f'setting max_steps={args.max_steps} based on num_tokens={num_tokens:2.2e} '
-              f'and tokens_already_seen={tokens_already_seen:2.2e}')
+        computed_max_steps = int(num_tokens // (effective_batch_size * args.world_size * 1024))
+        if explicit_max_steps is not None:
+            print(f'num_tokens would set max_steps={computed_max_steps}, but keeping explicit max_steps={args.max_steps}')
+        else:
+            args.max_steps = computed_max_steps
+            print(f'setting max_steps={args.max_steps} based on num_tokens={num_tokens:2.2e} '
+                  f'and tokens_already_seen={tokens_already_seen:2.2e}')
     return args
 
 
@@ -106,7 +111,7 @@ def train(checkpoint_path: str, config: dict[str, Any]):
     generation_callback = prepare_generation_callback(**config['generation'])
     callbacks = [
         SetupCallback(),
-        CustomWandbCallback(),
+        CustomCometCallback(),
         generation_callback
     ]
     if 'kl_gpt3_callback' in config:
@@ -125,15 +130,15 @@ def train(checkpoint_path: str, config: dict[str, Any]):
         input_inspector=input_inspector,
         callbacks=callbacks)
     if training_args.hub_model_id is not None:
-        trainer.create_model_card(dataset_tags=config['dataset']['datasets'], wandb_run=wandb.run, full_config=config)
+        trainer.create_model_card(dataset_tags=config['dataset']['datasets'], full_config=config)
     trainer.train(resume_from_checkpoint=checkpoint_path)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--run_name', type=str, help='wandb run name', default=None)
-    parser.add_argument('--group_name', type=str, help='wandb group name', default=None)
-    parser.add_argument('--tags', nargs='+', help='wandb tags',  default=[])
+    parser.add_argument('--run_name', type=str, help='Comet ML experiment name', default=None)
+    parser.add_argument('--group_name', type=str, help='Comet ML experiment group', default=None)
+    parser.add_argument('--tags', nargs='+', help='Comet ML tags',  default=[])
     parser.add_argument('--task', type=str, help='a path to a YAML file with task configuration')
     parser.add_argument('--method', type=str, help='a path to a YAML file with method configuration')
     parser.add_argument('--checkpoint_path', type=str, help='a path to checkpoint to resume training', default=None)
@@ -145,9 +150,15 @@ if __name__ == '__main__':
     config = dict(merge_configs(task_config, method_config))
     if args.override:  # override YAML config from command-line
         override_config(config, params_to_override=args.override)
-    wandb.init(name=args.run_name, group=args.group_name, config=config, tags=args.tags,
-               notes=os.environ.get('SLURM_JOB_ID', 'local'))
-    if wandb.run.sweep_id is not None:
-        config = unflatten_config(wandb.config)  # allow wandb to modify config for sweeps
+    experiment = comet_ml.OfflineExperiment(
+        project_name='pretraining-with-human-feedback',
+        offline_directory='./comet_logs'
+    )
+    if args.run_name:
+        experiment.set_name(args.run_name)
+    if args.tags:
+        experiment.add_tags(args.tags)
+    experiment.log_parameters(config)
     set_seed(config['training']['seed'])
     train(args.checkpoint_path, config=config)
+    experiment.end()

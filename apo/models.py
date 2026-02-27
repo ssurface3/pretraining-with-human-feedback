@@ -1,4 +1,5 @@
 from typing import Optional, Tuple, Any
+from dataclasses import dataclass
 
 import torch
 import torch.utils.checkpoint
@@ -9,6 +10,7 @@ from transformers.file_utils import ModelOutput
 from apo.utils import CustomMinLengthLogitsProcessor
 
 
+@dataclass
 class CausalLMOutputWithCrossAttentionsAndValues(ModelOutput):
     """
     A custom variant of `CausalLMOutputWithCrossAttentions` that also stores the value predicted by a value head
@@ -174,6 +176,13 @@ class GPT2LMAndValueHeadModel(GPT2LMHeadModel):
 
     def _get_logits_processor(self, *args, **kwargs):
         logits_processors = super()._get_logits_processor(*args, **kwargs)
-        min_length, eos_token_id = kwargs.get('min_length'), kwargs.get('eos_token_id')
+        # In modern transformers, min_length and eos_token_id live inside generation_config
+        generation_config = args[0] if args else kwargs.get('generation_config')
+        if hasattr(generation_config, 'min_length'):
+            min_length = generation_config.min_length
+            eos_token_id = generation_config.eos_token_id
+        else:
+            min_length = kwargs.get('min_length')
+            eos_token_id = kwargs.get('eos_token_id')
         logits_processors.append(CustomMinLengthLogitsProcessor(min_length, eos_token_id))
         return logits_processors
