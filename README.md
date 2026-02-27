@@ -1,100 +1,166 @@
 # Pretraining Language Models with Human Preferences
 
-This repo contains the code accompanying the paper [Pretraining Language Models with Human Preferences](https://arxiv.org/abs/2302.08582). The codebase is build around Hugging Face Transformers' `Trainer` and contains implementations of five objectives for pretraining with human feedback (PHF) discussed in the paper, as well as callbacks and scripts for evaluating them.
+This is a modernized fork of the codebase accompanying the paper [Pretraining Language Models with Human Preferences](https://arxiv.org/abs/2302.08582) (Korbak et al., 2023). It has been updated to work with **Python 3.12**, modern PyTorch/Transformers, and uses **Comet ML** for experiment tracking (replacing the original Weights & Biases integration).
 
-PHF objectives can be implemented by annotated the training data with rewards and overwriting `Trainer.compute_loss` to use them as additional training signal. Rewards are provided by an instance of `apo.scorers.Scorer`: an object able to determine, for a given piece of text, whether it is aligned or misaligned with human preferences such as non-offensiveness. The scorer is also used for evaluating samples from PHF-trained LMs.
+The codebase is built around Hugging Face Transformers' `Trainer` and contains implementations of five objectives for pretraining with human feedback (PHF). PHF objectives annotate training data with rewards and overwrite `Trainer.compute_loss` to use them as additional training signal. Rewards are provided by `apo.scorers.Scorer`: an object that determines whether a piece of text is aligned or misaligned with human preferences (e.g. non-toxicity).
 
-The codebase is built around Hugging Face ecosystem and [wand](http://wandb.ai) (for monitoring and experiment management). 
+## Requirements
+
+- **Python** 3.12+
+- **PyTorch** 2.1+
+- **Transformers** 4.36+
+- **CUDA GPU** (tested on Tesla T4)
+- **Comet ML** 3.30+ (for experiment tracking)
 
 ## Quickstart
 
-We assume Python 3.9+. To run the training script for MLE on the toxicity task, do:
 ```bash
 pip install -r requirements.txt
-wandb login  # or set `WANDB_API_KEY` and `WANDB_PROJECT` env variables
-export OPENAI_API_KEY='sk-your_key'  # needed for evaluation
-python train.py --task configs/toxicity/pretrain.yml --method configs/toxicity/mle.yml
+python train.py --task configs/toxicity/pretrain.yml --method configs/toxicity/conditional.yml
 ```
 
-### Configuration
+### Quick test run (100 steps)
 
-The `train.py` scripts requires paths to two config files: for task and for method. Config files for tasks (`toxicity`, `pii`, `pep8`) are stored in YAML files: `configs/{task}/pretrain.yml` (for pretraining experiments) and `configs/{task}/finetuning.yml` (for finetuning). Config files for methods are stored separately in `configs/{task}` directories. Each task-method config pair (for pretraining and for finetuning) contains the hyperparameters we used in our experiments and allows for reproducing results from the paper.
-
-Individual parameters can be overridden from command line using the `override` argument. For instance:
 ```bash
-python train.py --task configs/toxicity/pretrain.yml --method configs/toxicity/mle.yml --override training.per_device_train_batch_size=8
+cd /kaggle/working/pretraining-with-human-feedback
+CUDA_VISIBLE_DEVICES=0 python train.py \
+  --task configs/toxicity/pretrain.yml \
+  --method configs/toxicity/conditional.yml \
+  --override training.max_steps=100 training.eval_steps=50
+```
+
+### Longer training (1000 steps)
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python train.py \
+  --task configs/toxicity/pretrain.yml \
+  --method configs/toxicity/conditional.yml \
+  --override training.max_steps=1000 training.eval_steps=500
+```
+
+## Configuration
+
+The `train.py` script requires two config files: **task** and **method**.
+
+- **Task configs** (`configs/{task}/pretrain.yml` or `configs/{task}/finetune.yml`) define the dataset, tokenizer, model, and training hyperparameters.
+- **Method configs** (`configs/{task}/{method}.yml`) define the objective and method-specific settings (e.g. conditional training prefixes, filtering thresholds).
+
+### Key training parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `training.max_steps` | Derived from `num_tokens` | Total optimizer steps |
+| `training.eval_steps` | — | Evaluate every N steps |
+| `training.per_device_train_batch_size` | 8 | Micro-batch size per GPU |
+| `training.effective_batch_size` | 64 | Target effective batch size (gradient accumulation computed automatically) |
+| `training.learning_rate` | 0.0005 | Peak learning rate |
+| `training.fp16` | true | Mixed precision training |
+| `training.warmup_ratio` | 0.01 | Fraction of steps for LR warmup |
+| `training.weight_decay` | 0.1 | Weight decay |
+| `training.seed` | 42 | Random seed |
+| `generation.run_on_train_start` | true | Run generation evaluation before training |
+| `generation.run_on_train_end` | true | Run generation evaluation after training |
+
+### Overriding parameters
+
+Any config value can be overridden from the command line:
+
+```bash
+python train.py \
+  --task configs/toxicity/pretrain.yml \
+  --method configs/toxicity/conditional.yml \
+  --override training.max_steps=500 training.learning_rate=0.0001 training.per_device_train_batch_size=4
 ```
 
 ## Tasks
 
-| Name        | Config files       | Training data                                                                                                                                 | Scorer            | Description
-| ----------- |--------------------|-----------------------------------------------------------------------------------------------------------------------------------------------| --------          | --------
-| Toxicity    | `configs/toxicity` | [`tomekkorbak/pile-detoxify`](https://huggingface.co/datasets/tomekkorbak/pile-detoxify)                                             | `DetoxifyToxicityScorer` | Misalignment score is the probability of toxicity according to [detoxify](https://github.com/unitaryai/detoxify)
-| PII         | `configs/pii`      | [`tomekkorbak/pile-pii-scrubadub`](https://huggingface.co/datasets/tomekkorbak/pile-pii-scrubadub)                                            | `PIIScorer` | Misalignment score is the number of PIIs (e.g. names, URLs) per character, according to [scrubadub](https://github.com/LeapBeyond/scrubadub)
-| PEP8         | `configs/pep8` | [`kejian/codeparrot-train-more-filter-3.3b-cleaned`](https://huggingface.co/datasets/kejian/kejian/codeparrot-train-more-filter-3.3b-cleaned) | `PEP8Scorer` | Misalignment score is the number of PEP8 violations per character, according to [pycodestyle](https://github.com/PyCQA/pycodestyle)
+| Name | Config files | Training data | Scorer | Description |
+|------|-------------|---------------|--------|-------------|
+| Toxicity | `configs/toxicity` | [`tomekkorbak/pile-detoxify`](https://huggingface.co/datasets/tomekkorbak/pile-detoxify) | `DetoxifyToxicityScorer` | Toxicity probability via [detoxify](https://github.com/unitaryai/detoxify) |
+| PII | `configs/pii` | [`tomekkorbak/pile-pii-scrubadub`](https://huggingface.co/datasets/tomekkorbak/pile-pii-scrubadub) | `PIIScorer` | PII count per character via [scrubadub](https://github.com/LeapBeyond/scrubadub) |
+| PEP8 | `configs/pep8` | [`kejian/codeparrot-train-more-filter-3.3b-cleaned`](https://huggingface.co/datasets/kejian/codeparrot-train-more-filter-3.3b-cleaned) | `PEP8Scorer` | PEP8 violations per character via [pycodestyle](https://github.com/PyCQA/pycodestyle) |
 
-## Objectives 
+## Objectives
 
-The six objectives for training with human feedback used in our experiments are implemented as follows:
+| Name | Objective class | Description |
+|------|----------------|-------------|
+| MLE | `MLE` | Standard cross-entropy loss |
+| Filtering | `MLE` | Requires `dataset.filter_threshold` in config |
+| Conditional training | `MLE` | Requires `dataset.conditional_training_config` in config |
+| Unlikelihood | `Unlikelihood` | Requires `objective.score_threshold` and `objective.alpha` |
+| AWR | `AWR` | Requires `objective.alpha` and `objective.beta` |
+| RWR | `AWR` | Special case of AWR with `objective.alpha=1` |
 
-| Name                 | Objective class | Description                                                                           | 
-|----------------------|-----------------|---------------------------------------------------------------------------------------|
-| MLE                  | `MLE`            | A thin wrapper around PyTorch `CrossEntropyLoss`                                      |
-| Filtering            | `MLE` | You need to set `dataset.filter_threshold` in config                                  |
-| Conditional training | `MLE` | You also need to set `dataset.conditional_training_config` in config`                 |
-| Unlikelihood         | `Unlikelihood` | You also need to set hyperparameters `objective.score_threshold` and `objective.alpha` |
-| AWR                  | `AWR` | You also need to set hyperparameters `objective.alpha` and `objective.beta`           |
-| RWR                  | `AWR` | A special case of AWR with `objective.alpha=1`                                        |   
+## Experiment Tracking (Comet ML)
 
-## Pretrained models
+This fork uses [Comet ML](https://www.comet.com/) in **offline mode** by default. Experiment logs are saved to `./comet_logs/`. To upload results:
 
-The models pretrained in our experiments are available on HugginFace Hub:
+```bash
+comet upload ./comet_logs/<experiment_id>.zip
+```
 
-| Objective        | Toxicity                                                                                        | PEP8                                                                          | PII                                                                                         |
-|------------------|-------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------|
-| MLE              | [tomekkorbak/goofy_pasteur](https://huggingface.co/tomekkorbak/goofy_pasteur)                   | [kejian/mighty-mle](https://huggingface.co/kejian/mighty-mle)                 | [tomekkorbak/nervous_wozniak](https://huggingface.co/tomekkorbak/nervous_wozniak)           |
-| Filtering median | [tomekkorbak/amazing_shannon](https://huggingface.co/tomekkorbak/amazing_shannon)               | [kejian/mighty-filtering](https://huggingface.co/kejian/mighty-filtering)     | [tomekkorbak/cocky_carson](https://huggingface.co/tomekkorbak/cocky_carson)                 |
-| Conditional      | [tomekkorbak/hungry_saha](https://huggingface.co/tomekkorbak/hungry_saha)                       | [kejian/mighty-conditional](https://huggingface.co/kejian/mighty-conditional) | [tomekkorbak/boring_mcclintock](https://huggingface.co/tomekkorbak/boring_mcclintock)       |
-| UL               | [tomekkorbak/nifty_banach](https://huggingface.co/tomekkorbak/nifty_banach)                     | [kejian/mighty-ul](https://huggingface.co/kejian/mighty-ul)                   | [tomekkorbak/affectionate_wescoff](https://huggingface.co/tomekkorbak/affectionate_wescoff) |
-| AWR              | [tomekkorbak/upbeat_ramanujan](https://huggingface.co/tomekkorbak/tomekkorbak/upbeat_ramanujan) | [kejian/vigor-awr](https://huggingface.co/tomekkorbak/kejian/vigor-awr)       | [tomekkorbak/confident_knuth](https://huggingface.co/tomekkorbak/confident_knuth)           |
-| RWR              | [tomekkorbak/keen_clarke](https://huggingface.co/tomekkorbak/tomekkorbak/keen_clarke)      | [kejian/mighty-rwr](https://huggingface.co/tomekkorbak/kejian/mighty-rwr)                                                         | [tomekkorbak/gifted_hugle](https://huggingface.co/tomekkorbak/gifted_hugle)                                                                           |
-
+To use online mode, set your API key:
+```bash
+export COMET_API_KEY='your-key-here'
+```
 
 ## Metrics
 
-On each evaluation step, `apo.callbacks.GenerateAndScoreCallback` iterates over a list of `GenerationScenario`s provided in the task config file. For each scenario, `num_samples` samples are generated and the following wandb metrics are computed:
-* `score`, average misalignment (across `num_samples` samples) of the generated samples assigned by the scorer
-  * `score_max@25`, average maximum score in 25 samples (similar to expected maximum toxicity in the [RealToxicityPrompts](https://arxiv.org/abs/2009.11462) paper)
-* `current_samples`, a [`wandb.Table`](https://docs.wandb.ai/ref/python/data-types/table) of samples together with their prompts (if any) and scores
+On each evaluation step, `apo.callbacks.GenerateAndScoreCallback` generates samples and computes:
 
-In addition to scoring LM samples, we use `apo.callbacks.KLGPT3Callback` to estimate KL of the current LM from GPT-3. This requires drawing samples from GPT-3 which are cached and reused in subsequent iterations.
-                                                                    |
+- `score` — average misalignment score across generated samples
+- `score_max@25` — average maximum score in 25 samples (similar to expected maximum toxicity in [RealToxicityPrompts](https://arxiv.org/abs/2009.11462))
+- `current_samples` — table of samples with prompts and scores (logged to Comet ML)
 
+`apo.callbacks.KLGPT3Callback` estimates KL divergence from GPT-3 (requires `OPENAI_API_KEY`; disabled gracefully if not set).
+
+## Pretrained models
+
+The models pretrained in the original paper are available on HuggingFace Hub:
+
+| Objective | Toxicity | PEP8 | PII |
+|-----------|----------|------|-----|
+| MLE | [goofy_pasteur](https://huggingface.co/tomekkorbak/goofy_pasteur) | [mighty-mle](https://huggingface.co/kejian/mighty-mle) | [nervous_wozniak](https://huggingface.co/tomekkorbak/nervous_wozniak) |
+| Filtering | [amazing_shannon](https://huggingface.co/tomekkorbak/amazing_shannon) | [mighty-filtering](https://huggingface.co/kejian/mighty-filtering) | [cocky_carson](https://huggingface.co/tomekkorbak/cocky_carson) |
+| Conditional | [hungry_saha](https://huggingface.co/tomekkorbak/hungry_saha) | [mighty-conditional](https://huggingface.co/kejian/mighty-conditional) | [boring_mcclintock](https://huggingface.co/tomekkorbak/boring_mcclintock) |
+| UL | [nifty_banach](https://huggingface.co/tomekkorbak/nifty_banach) | [mighty-ul](https://huggingface.co/kejian/mighty-ul) | [affectionate_wescoff](https://huggingface.co/tomekkorbak/affectionate_wescoff) |
+| AWR | [upbeat_ramanujan](https://huggingface.co/tomekkorbak/upbeat_ramanujan) | [vigor-awr](https://huggingface.co/kejian/vigor-awr) | [confident_knuth](https://huggingface.co/tomekkorbak/confident_knuth) |
+| RWR | [keen_clarke](https://huggingface.co/tomekkorbak/keen_clarke) | [mighty-rwr](https://huggingface.co/kejian/mighty-rwr) | [gifted_hugle](https://huggingface.co/tomekkorbak/gifted_hugle) |
 
 ## Codebase structure
 
-```bash
-.
-├── apo
-│   ├── callbacks.py  # callbacks implementing the evaluation pipeline 
-│   ├── dataset_wrappers.py  # an iterable for streaming blocks of tokens for training
-│   ├── kl_gpt3.py  # logic for measuring KL from GPT-3
-│   └── metrics.py  # metrics computed on LM samples (and dataset elements, for debugging)
-│   └── models.py  # a subclass for GPT2LMHeadModel adding value heads and exposing implementation details
-│   └── objectives.py  # classes implementing loss functions
-│   ├── scorer_utils.py
-│   ├── scorers.py  # classes for scoring LM samples and dataset elements
-│   └── trainer.py  # a subclass for Hugging Face Trainer exposing some functionalities
-│   └── utils.py
-├── configs
-│   └── pep8
-│   └── pii
-│   └── toxicity
-├── scripts  # scripts for evaluation
-│    dataset_builders  # scripts used to generate some of the datasets
-├── resources  # small, git-tracked files from which lists of words or prompts are loaded
-└── train.py  # the main training script
 ```
+.
+├── train.py                 # Main training script
+├── requirements.txt         # Python 3.12-compatible dependencies
+├── apo/
+│   ├── callbacks.py         # Evaluation pipeline (Comet ML logging)
+│   ├── dataset_wrappers.py  # Iterable streaming blocks of tokens
+│   ├── kl_gpt3.py           # KL divergence from GPT-3
+│   ├── metrics.py           # Metrics on LM samples
+│   ├── models.py            # GPT2LMHeadModel with value heads
+│   ├── objectives.py        # Loss functions (MLE, AWR, Unlikelihood)
+│   ├── scorer_utils.py      # Scorer utilities
+│   ├── scorers.py           # Scoring LM samples and dataset elements
+│   ├── trainer.py           # Custom HuggingFace Trainer subclass
+│   └── utils.py             # Utility functions
+├── configs/
+│   ├── toxicity/            # Toxicity task configs
+│   ├── pii/                 # PII task configs
+│   └── pep8/                # PEP8 task configs
+├── scripts/
+│   └── dataset_builders/    # Dataset generation scripts
+└── resources/               # Prompt lists, word lists
+```
+
+## Changes from the original repo
+
+- **Python 3.12 compatibility** — updated all dependencies and fixed API breaking changes
+- **Comet ML** replaces Weights & Biases for experiment tracking
+- **Modern library support** — works with PyTorch 2.1+, Transformers 4.36+, Datasets 2.14+
+- **Bug fixes** — `max_steps` override preserved correctly, DDP guard for single-GPU, graceful fallbacks for optional callbacks
+
+See `changes_in_the_code.txt` for a detailed changelog of all 33 code modifications.
 
 ## Citing
 
@@ -105,7 +171,7 @@ In addition to scoring LM samples, we use `apo.callbacks.KLGPT3Callback` to esti
   author = {Korbak, Tomasz and Shi, Kejian and Chen, Angelica and Bhalerao, Rasika and Buckley, Christopher L. and Phang, Jason and Bowman, Samuel R. and Perez, Ethan},
   keywords = {Computation and Language (cs.CL), Machine Learning (cs.LG), FOS: Computer and information sciences, FOS: Computer and information sciences},
   title = {Pretraining Language Models with Human Preferences},
-  publisher = {arXiv},  
+  publisher = {arXiv},
   year = {2023},
   copyright = {Creative Commons Attribution 4.0 International}
 }
