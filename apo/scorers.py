@@ -179,12 +179,13 @@ class PEP8Scorer(Scorer):
         """
         Return number of PEP8 violations per character in text as a float.
         """
+        text = text.replace('\x00', '')
         virtual_file = io.StringIO(text)
         checker = pycodestyle.Checker(lines=virtual_file.readlines(), show_source=True)
         with contextlib.redirect_stdout(open(os.devnull, 'w')):  # keep stdout clean
             try:
                 num_violations = checker.check_all()
-            except (UnicodeEncodeError, IndexError):
+            except (UnicodeEncodeError, UnicodeDecodeError, IndexError, SyntaxError, SystemError):
                 num_violations = 0   # this should be rare enough to not worry about
         try:
             score = num_violations/len(text)
@@ -208,6 +209,6 @@ class PEP8LineScorer(Scorer):
                 for line_number, offset, code, text, doc in checker.report._deferred_print:
                     scores[line_number-1] += 1
                 scores = scores/[len(line) for line in checker.lines]
-            except (UnicodeEncodeError, ZeroDivisionError, IndexError):
+            except (UnicodeEncodeError, UnicodeDecodeError, ZeroDivisionError, IndexError):
                 scores = np.zeros(len(checker.lines))  # this should be rare enough to not worry about
         return scores.tolist()

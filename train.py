@@ -68,7 +68,7 @@ def prepare_trainer_arguments(**kwargs) -> TrainingArguments:
     args = TrainingArguments(report_to=['none'], **kwargs)
     if effective_batch_size:
         if args.world_size <= 1:
-            instantaneous_bsz = (args.per_device_train_batch_size * args.world_size * args.n_gpu)
+            instantaneous_bsz = (args.per_device_train_batch_size * args.world_size * max(args.n_gpu, 1))
             args.gradient_accumulation_steps = int(effective_batch_size // instantaneous_bsz)
             print(f'setting gradient_accumulation_steps={args.gradient_accumulation_steps} based on '
                   f'effective_batch_size={effective_batch_size} and instantaneous_bsz={instantaneous_bsz} '

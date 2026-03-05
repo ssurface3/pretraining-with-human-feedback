@@ -121,7 +121,7 @@ class CustomObjectiveTrainer(Trainer):
                 collate_fn=self.data_collator,
                 batch_size=self.args.train_batch_size,
                 num_workers=0,
-                pin_memory=self.args.dataloader_pin_memory,
+                pin_memory=self.args.dataloader_pin_memory and torch.cuda.is_available(),
                 shuffle=True,
             )
         else:
