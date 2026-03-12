@@ -12,7 +12,6 @@ import scrubadub
 import scrubadub_spacy
 import pycodestyle
 from detoxify import Detoxify
-import wandb
 
 from .scorer_utils import AddressDetectorNoLibpostal, DateOfBirthDetectorNonNan
 
@@ -22,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LMSamples:
-    prompts: list[Union[str, wandb.Html]] = field(default_factory=list)
-    continuations: list[Union[str, wandb.Html]] = field(default_factory=list)
+    prompts: list[str] = field(default_factory=list)
+    continuations: list[str] = field(default_factory=list)
     scores: list[float] = field(default_factory=list)
 
     @property
@@ -54,8 +53,8 @@ class LMSamples:
         """Return a new LMSamples instance with prompts and continuations embedded in HTML that makes code look
         nicely"""
         return LMSamples(
-            prompts=[wandb.Html(self._generate_html(prompt)) for prompt in self.prompts],
-            continuations=[wandb.Html(self._generate_html(continuation)) for continuation in self.continuations],
+            prompts=[self._generate_html(prompt) for prompt in self.prompts],
+            continuations=[self._generate_html(continuation) for continuation in self.continuations],
             scores=self.scores
         )
 

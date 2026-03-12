@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import NamedTuple, Optional
 
-import wandb
 import torch
 from torch.nn import CrossEntropyLoss, MSELoss, Module
 from torch.nn import functional as F
@@ -123,11 +122,9 @@ class AWR(Objective):
             'value_avg': values_shifted.mean(),
             'value_std': values_shifted.std(),
             'value_reward_corr': pearsonr(values_shifted.detach().cpu().numpy(), reward.cpu().numpy())[0],
-            'value_dis': wandb.Histogram(values_shifted.detach().cpu().numpy()),
             'weight_avg': weights.mean(),
             'weights_min': weights.min(),
             'weights_max': weights.max(),
-            'weight_dist': wandb.Histogram(weights.detach().cpu().numpy()),
             'advantage_avg': advantage.mean(),
         } if log_stats else {}
         loss = self.alpha * weighted_lm_loss + (1-self.alpha) * value_loss

@@ -122,7 +122,7 @@ class CustomObjectiveTrainer(Trainer):
                 batch_size=self.args.train_batch_size,
                 num_workers=0,
                 pin_memory=self.args.dataloader_pin_memory and torch.cuda.is_available(),
-                shuffle=True,
+                shuffle=False,  # IterableDataset doesn't support shuffle; data is already shuffled via ShufflerIterDataPipe
             )
         else:
             return super().get_train_dataloader()

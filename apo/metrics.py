@@ -6,12 +6,10 @@ from multiprocessing import Pool
 
 import numpy as np
 from scipy.stats import entropy
-from wandb import Table
-from wandb.data_types import WBValue
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 
 
-MetricOutput = dict[str, Union[float, int, WBValue]]
+MetricOutput = dict[str, Union[float, int]]
 
 
 class Metric(ABC):
@@ -56,10 +54,6 @@ class NGramStats(Metric):
         }
         if self.log_tables:
             logs[f'distinct-{self.n}-grams_in_batch'] = len(batch_ngram_counts)
-            logs[f'{self.n}-gram counts'] = Table(
-                columns=['ngram', 'count', 'rank'],
-                data=[(ngram, count, rank) for rank, (ngram, count) in enumerate(batch_ngram_counts.most_common())]
-            )
         return logs
 
     def _get_ngrams(self, token_list: list[str]):

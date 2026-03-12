@@ -6,6 +6,7 @@ import os
 import logging
 
 import numpy as np
+import torch
 import srsly
 import comet_ml
 from transformers import TrainerCallback, PreTrainedModel, PreTrainedTokenizer, TrainingArguments, TrainerState, \
@@ -191,10 +192,15 @@ class GenerateAndScoreCallback(CustomCallback):
         for scenario in self.scenarios:
             start_time = time.time()
             samples = LMSamples()
-            for i in range(scenario.num_samples // self.batch_size or 1):
-                print(f'Generating samples, scenario {scenario.name}, batch {i+1} of '
-                      f'{scenario.num_samples // self.batch_size}')
-                samples += self.generate_and_score_for_scenario(model, tokenizer, scenario, num_samples=self.batch_size)
+            try:
+                for i in range(scenario.num_samples // self.batch_size or 1):
+                    print(f'Generating samples, scenario {scenario.name}, batch {i+1} of '
+                          f'{scenario.num_samples // self.batch_size}')
+                    samples += self.generate_and_score_for_scenario(model, tokenizer, scenario, num_samples=self.batch_size)
+            except (RuntimeError, torch.cuda.CudaError) as e:
+                logging.warning(f'Generation failed for scenario {scenario.name}: {e}. '
+                                f'Model weights may contain NaN. Skipping evaluation.')
+                continue
             prefix = f'generation/{scenario.name}'
             experiment = comet_ml.get_running_experiment()
             if experiment:
@@ -228,10 +234,16 @@ class GenerateAndScoreCallback(CustomCallback):
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
-        model: PreTrainedModel,
-        tokenizer: PreTrainedTokenizer,
+        model: PreTrainedModel = None,
+        tokenizer: PreTrainedTokenizer = None,
         **kwargs
     ):
+        model = model or kwargs.get('model')
+        tokenizer = tokenizer or kwargs.get('processing_class') or kwargs.get('tokenizer')
+        # Run the final generation evaluation via parent
+        if self.run_on_train_end:
+            self.run(args, state, control, model, tokenizer, **kwargs)
+        # Log accumulated samples to Comet ML
         experiment = comet_ml.get_running_experiment()
         if experiment:
             for table_name, table_data in self.all_samples.items():
@@ -272,6 +284,8 @@ class GenerateAndScoreCallback(CustomCallback):
         prompts_and_continuations = model.generate(
             inputs=tokenized_prompts['input_ids'],
             attention_mask=tokenized_prompts['attention_mask'],
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
             **scenario.generate_kwargs
         )
         prompts_and_continuations = tokenizer.batch_decode(prompts_and_continuations)

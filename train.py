@@ -144,12 +144,26 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint_path', type=str, help='a path to checkpoint to resume training', default=None)
     parser.add_argument('--override', nargs='+', type=str,
                         help='a list of params to override, e.g. model.from_scratch=True dataset.num_proc=16')
+    parser.add_argument('--precision', type=str, choices=['fp16', 'bf16', 'fp32'], default=None,
+                        help='Override training precision: fp16 (original), bf16 (recommended for A100+), fp32 (no mixed precision)')
     args = parser.parse_args()
     task_config = yaml.full_load(open(args.task, 'r'))
     method_config = yaml.full_load(open(args.method, 'r'))
     config = dict(merge_configs(task_config, method_config))
     if args.override:  # override YAML config from command-line
         override_config(config, params_to_override=args.override)
+    # Apply precision override
+    if args.precision is not None:
+        config['training'].pop('fp16', None)
+        config['training'].pop('bf16', None)
+        if args.precision == 'fp16':
+            config['training']['fp16'] = True
+        elif args.precision == 'bf16':
+            config['training']['bf16'] = True
+            config['training']['max_grad_norm'] = config['training'].get('max_grad_norm', 1.0)
+        elif args.precision == 'fp32':
+            pass  # no mixed precision flags
+        print(f'Precision override: {args.precision}')
     experiment = comet_ml.OfflineExperiment(
         project_name='pretraining-with-human-feedback',
         offline_directory='./comet_logs'
