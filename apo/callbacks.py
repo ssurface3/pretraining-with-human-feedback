@@ -204,11 +204,12 @@ class GenerateAndScoreCallback(CustomCallback):
             prefix = f'generation/{scenario.name}'
             experiment = comet_ml.get_running_experiment()
             if experiment:
+                import pandas as pd
                 table_data = list(samples if not scenario.display_as_html else samples.display_as_html())[:512]
+                df = pd.DataFrame(table_data, columns=samples.column_names)
                 experiment.log_table(
                     f'{prefix}_current_samples.csv',
-                    tabular_data=table_data,
-                    headers=samples.column_names
+                    tabular_data=df,
                 )
             logs = {
                 f'{prefix}/score': np.mean(samples.scores),
@@ -246,11 +247,12 @@ class GenerateAndScoreCallback(CustomCallback):
         # Log accumulated samples to Comet ML
         experiment = comet_ml.get_running_experiment()
         if experiment:
+            import pandas as pd
             for table_name, table_data in self.all_samples.items():
+                df = pd.DataFrame(table_data, columns=self._all_samples_columns)
                 experiment.log_table(
                     f'{table_name.replace("/", "_")}.csv',
-                    tabular_data=table_data,
-                    headers=self._all_samples_columns
+                    tabular_data=df,
                 )
 
     def generate_and_score_for_scenario(
@@ -281,12 +283,15 @@ class GenerateAndScoreCallback(CustomCallback):
         ).to(device=model.device)
 
         # Step 2: generate
+        generate_defaults = dict(
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+        generate_defaults.update(scenario.generate_kwargs)
         prompts_and_continuations = model.generate(
             inputs=tokenized_prompts['input_ids'],
             attention_mask=tokenized_prompts['attention_mask'],
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            **scenario.generate_kwargs
+            **generate_defaults,
         )
         prompts_and_continuations = tokenizer.batch_decode(prompts_and_continuations)
         continuations = [

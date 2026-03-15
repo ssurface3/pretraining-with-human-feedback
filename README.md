@@ -6,36 +6,72 @@ The codebase is built around Hugging Face Transformers' `Trainer` and contains i
 
 ## Requirements
 
-- **Python** 3.12+
+- **Python** 3.10 (tested) or 3.12+
 - **PyTorch** 2.1+
-- **Transformers** 4.36+
-- **CUDA GPU** (tested on Tesla T4)
+- **Transformers** 4.49+
+- **CUDA GPU** (tested on Tesla T4 and A100)
 - **Comet ML** 3.30+ (for experiment tracking)
+
+## Environment Setup
+
+### Option 1: Conda (recommended)
+
+```bash
+conda create -n phf python=3.10 -y
+conda activate phf
+pip install -r requirements-datasphere.txt
+```
+
+### Option 2: pip / venv
+
+```bash
+python3.10 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-datasphere.txt
+```
+
+`requirements-datasphere.txt` contains pinned versions tested on GPU servers.
+`requirements.txt` has relaxed version ranges if you need flexibility.
+
+### Verify installation
+
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
 
 ## Quickstart
 
 ```bash
-pip install -r requirements.txt
 python train.py --task configs/toxicity/pretrain.yml --method configs/toxicity/conditional.yml
 ```
 
-### Quick test run (100 steps)
+### Quick test run (10 steps)
 
 ```bash
-cd /kaggle/working/pretraining-with-human-feedback
-CUDA_VISIBLE_DEVICES=0 python train.py \
+python train.py \
   --task configs/toxicity/pretrain.yml \
   --method configs/toxicity/conditional.yml \
-  --override training.max_steps=100 training.eval_steps=50
+  --override training.max_steps=10 training.save_steps=10 training.logging_steps=1 \
+  --precision bf16
+```
+
+### PEP8 task
+
+```bash
+python train.py \
+  --task configs/pep8/pretrain.yml \
+  --method configs/pep8/filtering.yml \
+  --precision bf16
 ```
 
 ### Longer training (1000 steps)
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python train.py \
+python train.py \
   --task configs/toxicity/pretrain.yml \
   --method configs/toxicity/conditional.yml \
-  --override training.max_steps=1000 training.eval_steps=500
+  --override training.max_steps=1000 training.eval_steps=500 \
+  --precision bf16
 ```
 
 ## Configuration
@@ -132,7 +168,8 @@ The models pretrained in the original paper are available on HuggingFace Hub:
 ```
 .
 ├── train.py                 # Main training script
-├── requirements.txt         # Python 3.12-compatible dependencies
+├── requirements.txt              # Relaxed version ranges (flexible)
+├── requirements-datasphere.txt  # Pinned versions (tested on GPU servers)
 ├── apo/
 │   ├── callbacks.py         # Evaluation pipeline (Comet ML logging)
 │   ├── dataset_wrappers.py  # Iterable streaming blocks of tokens
