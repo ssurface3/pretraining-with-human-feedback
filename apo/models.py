@@ -176,13 +176,11 @@ class GPT2LMAndValueHeadModel(GPT2LMHeadModel):
 
     def _get_logits_processor(self, *args, **kwargs):
         logits_processors = super()._get_logits_processor(*args, **kwargs)
-        # In modern transformers, min_length and eos_token_id live inside generation_config
+        # In modern transformers, min_length and eos_token_id live inside generation_config,
+        # which is always the first positional argument.
         generation_config = args[0] if args else kwargs.get('generation_config')
-        if hasattr(generation_config, 'min_length'):
-            min_length = generation_config.min_length
-            eos_token_id = generation_config.eos_token_id
-        else:
-            min_length = kwargs.get('min_length')
-            eos_token_id = kwargs.get('eos_token_id')
-        logits_processors.append(CustomMinLengthLogitsProcessor(min_length, eos_token_id))
+        min_length = generation_config.min_length
+        eos_token_id = generation_config.eos_token_id
+        if min_length and eos_token_id is not None:
+            logits_processors.append(CustomMinLengthLogitsProcessor(min_length, eos_token_id))
         return logits_processors

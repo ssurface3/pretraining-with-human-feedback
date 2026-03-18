@@ -64,7 +64,7 @@ training:
   fp16: true
   max_grad_norm: 1.0
   weight_decay: 0.1
-  evaluation_strategy: 'no'
+  eval_strategy: 'no'
   logging_steps: 1
   warmup_ratio: 0.01
   logging_first_step: true

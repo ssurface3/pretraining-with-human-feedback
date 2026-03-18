@@ -3,6 +3,7 @@ import os
 from pprint import pformat
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -201,16 +202,15 @@ class ModelInputInspector:
         segments = self.get_segments(inputs)
         scores = [self.scorer.score_text(text) for text in segments]
         experiment = comet_ml.get_running_experiment()
-        if experiment:
+        if experiment and segments:
             experiment.log_table(
                 'debugging_segments.csv',
-                tabular_data=list(zip(segments, scores)),
-                headers=['segment', 'score']
+                tabular_data=pd.DataFrame(list(zip(segments, scores)), columns=['segment', 'score']),
             )
         raw_text = self.tokenizer.batch_decode(inputs['input_ids'])
         logs = {
-            f'debugging/score': np.mean(scores),
-            f'debugging/score_std': np.std(scores),
+            f'debugging/score': np.mean(scores) if scores else 0.0,
+            f'debugging/score_std': np.std(scores) if scores else 0.0,
             f'debugging/num_segments': len(segments),
         }
         if token_scores is not None and values is not None:
@@ -221,16 +221,17 @@ class ModelInputInspector:
             if experiment:
                 experiment.log_table(
                     'debugging_raw_text.csv',
-                    tabular_data=[(text, ' '.join(f'{s:.2f}' for s in score), ' '.join(f'{v:.2f}' for v in value))
-                                  for text, score, value in zip(raw_text, neg_scores, values)],
-                    headers=['raw batch text', '-scores', 'values']
+                    tabular_data=pd.DataFrame(
+                        [(text, ' '.join(f'{s:.2f}' for s in score), ' '.join(f'{v:.2f}' for v in value))
+                         for text, score, value in zip(raw_text, neg_scores, values)],
+                        columns=['raw batch text', '-scores', 'values']
+                    ),
                 )
         else:
             if experiment:
                 experiment.log_table(
                     'debugging_raw_text.csv',
-                    tabular_data=[(text,) for text in raw_text],
-                    headers=['raw batch text']
+                    tabular_data=pd.DataFrame([(text,) for text in raw_text], columns=['raw batch text']),
                 )
 
         for metric in self.metrics:
@@ -249,7 +250,8 @@ class ModelInputInspector:
             if position_idx + self.segment_length <= input['input_ids'].size(1):
                 segment_input_ids = input['input_ids'][batch_idx, position_idx: position_idx + self.segment_length]
                 segment_text = self.tokenizer.decode(segment_input_ids)
-                segment_text = segment_text.split(self.tokenizer.eos_token)[1]  # discard whatever is after the next EOS
+                parts = segment_text.split(self.tokenizer.eos_token, 1)
+                segment_text = parts[-1]  # take content after the leading EOS token
                 segments.append(segment_text)
         return segments
 

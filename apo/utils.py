@@ -105,16 +105,21 @@ def get_theoretical_loss(num_params, num_tokens):
 
 
 class CustomMinLengthLogitsProcessor(LogitsProcessor):
-    def __init__(self, min_length: int, eos_token_id: int):
+    def __init__(self, min_length: int, eos_token_id):
         self.min_length = min_length
-        self.eos_token_id = eos_token_id
-        self.prompt_lengths = None
+        # Normalise eos_token_id to a list so indexing always works
+        if isinstance(eos_token_id, int):
+            self.eos_token_ids = [eos_token_id]
+        else:
+            self.eos_token_ids = list(eos_token_id)
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        if self.prompt_lengths is None:
-            self.prompt_lengths = (input_ids == self.eos_token_id).sum(dim=1)
+        # Count EOS tokens per sequence to determine prompt length (vectorized)
+        prompt_lengths = sum(
+            (input_ids == eid).sum(dim=1) for eid in self.eos_token_ids
+        )
         cur_len = input_ids.shape[-1]
-        for i in range(scores.shape[0]):
-            if cur_len - self.prompt_lengths[i] < self.min_length:
-                scores[i, self.eos_token_id] = -float("inf")
+        mask = (cur_len - prompt_lengths) < self.min_length  # (batch,)
+        for eid in self.eos_token_ids:
+            scores[mask, eid] = -float("inf")
         return scores

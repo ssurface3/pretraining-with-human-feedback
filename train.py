@@ -123,7 +123,7 @@ def train(checkpoint_path: str, config: dict[str, Any]):
     )
     trainer = CustomObjectiveTrainer(
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         args=training_args,
         train_dataset=train_dataset,
         objective=objective,
@@ -147,8 +147,8 @@ if __name__ == '__main__':
     parser.add_argument('--precision', type=str, choices=['fp16', 'bf16', 'fp32'], default=None,
                         help='Override training precision: fp16 (original), bf16 (recommended for A100+), fp32 (no mixed precision)')
     args = parser.parse_args()
-    task_config = yaml.full_load(open(args.task, 'r'))
-    method_config = yaml.full_load(open(args.method, 'r'))
+    task_config = yaml.safe_load(open(args.task, 'r'))
+    method_config = yaml.safe_load(open(args.method, 'r'))
     config = dict(merge_configs(task_config, method_config))
     if args.override:  # override YAML config from command-line
         override_config(config, params_to_override=args.override)
@@ -174,5 +174,7 @@ if __name__ == '__main__':
         experiment.add_tags(args.tags)
     experiment.log_parameters(config)
     set_seed(config['training']['seed'])
-    train(args.checkpoint_path, config=config)
-    experiment.end()
+    try:
+        train(args.checkpoint_path, config=config)
+    finally:
+        experiment.end()
