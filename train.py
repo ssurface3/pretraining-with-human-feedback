@@ -147,8 +147,10 @@ if __name__ == '__main__':
     parser.add_argument('--precision', type=str, choices=['fp16', 'bf16', 'fp32'], default=None,
                         help='Override training precision: fp16 (original), bf16 (recommended for A100+), fp32 (no mixed precision)')
     args = parser.parse_args()
-    task_config = yaml.safe_load(open(args.task, 'r'))
-    method_config = yaml.safe_load(open(args.method, 'r'))
+    with open(args.task, 'r') as f:
+        task_config = yaml.safe_load(f)
+    with open(args.method, 'r') as f:
+        method_config = yaml.safe_load(f)
     config = dict(merge_configs(task_config, method_config))
     if args.override:  # override YAML config from command-line
         override_config(config, params_to_override=args.override)

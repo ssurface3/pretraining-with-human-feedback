@@ -1,3 +1,4 @@
+import ast
 import re
 from typing import Any, Generator
 from functools import reduce
@@ -16,7 +17,7 @@ def override_config(config: dict[str, Any], params_to_override: str) -> None:
     for key_value_pair in params_to_override:
         key, value = key_value_pair.split('=')
         key_path = key.split('.')  # nested dict lookup
-        value = value if bool(re.search(r"[^\.0-9 ]", value)) and value not in ["True","False", "None"] else eval(value)
+        value = value if bool(re.search(r"[^\.0-9 ]", value)) and value not in ["True","False", "None"] else ast.literal_eval(value)
         innermost_dict = reduce(getitem, key_path[:-1], config)
         innermost_dict[key_path[-1]] = value
     print(f'Configs after overriding:')
@@ -25,8 +26,8 @@ def override_config(config: dict[str, Any], params_to_override: str) -> None:
 
 def unflatten_config(config: dict[str, Any]) -> dict[str, Any]:
     """
-    Fix a bug in wandb's handling of nested configs in sweeps:
-    https://github.com/wandb/client/issues/982
+    Fix nested config keys (e.g. 'training.lr') that some experiment trackers
+    flatten during sweep serialization.
     """
     for key, value in config.items():
         if '.' in key:

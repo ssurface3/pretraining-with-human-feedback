@@ -181,7 +181,7 @@ class PEP8Scorer(Scorer):
         text = text.replace('\x00', '')
         virtual_file = io.StringIO(text)
         checker = pycodestyle.Checker(lines=virtual_file.readlines(), show_source=True)
-        with contextlib.redirect_stdout(open(os.devnull, 'w')):  # keep stdout clean
+        with open(os.devnull, 'w') as devnull, contextlib.redirect_stdout(devnull):  # keep stdout clean
             try:
                 num_violations = checker.check_all()
             except (UnicodeEncodeError, UnicodeDecodeError, IndexError, SyntaxError, SystemError):
@@ -201,13 +201,14 @@ class PEP8LineScorer(Scorer):
         """
         virtual_file = io.StringIO(text)
         checker = pycodestyle.Checker(lines=virtual_file.readlines(), show_source=True)
-        with contextlib.redirect_stdout(open(os.devnull, 'w')):  # keep stdout clean
+        with open(os.devnull, 'w') as devnull, contextlib.redirect_stdout(devnull):  # keep stdout clean
             try:
                 _ = checker.check_all()
                 scores = np.zeros(len(checker.lines))
-                for line_number, offset, code, text, doc in checker.report._deferred_print:
+                deferred = getattr(checker.report, '_deferred_print', [])
+                for line_number, offset, code, text, doc in deferred:
                     scores[line_number-1] += 1
                 scores = scores/[len(line) for line in checker.lines]
-            except (UnicodeEncodeError, UnicodeDecodeError, ZeroDivisionError, IndexError):
+            except (UnicodeEncodeError, UnicodeDecodeError, ZeroDivisionError, IndexError, AttributeError):
                 scores = np.zeros(len(checker.lines))  # this should be rare enough to not worry about
         return scores.tolist()

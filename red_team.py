@@ -6,11 +6,14 @@ import argparse
 from time import sleep
 import random
 
+import ast
+
 import openai
 import srsly
 from transformers import pipeline, TextGenerationPipeline
 from transformers.utils import logging
-import wandb
+import comet_ml
+import pandas as pd
 import numpy as np
 
 from apo.scorers import DetoxifyToxicityScorer, PIIScorer, PEP8Scorer
@@ -109,23 +112,24 @@ def parse_response(num_examples_to_extract: int, response: str, task: str) -> li
 
 
 def get_candidates_from_red_lm(prompt: str, n: int, top_p: float, temperature: float) -> list[str]:
+    client = openai.OpenAI()
     while True:
         try:
-            completions = openai.Completion.create(
-                model="text-davinci-002",
+            response = client.completions.create(
+                model="gpt-3.5-turbo-instruct",
                 prompt=prompt,
                 temperature=temperature,
                 max_tokens=1024,
                 top_p=top_p,
                 n=n
-            )['choices']
-        except openai.error.RateLimitError:
+            )
+        except openai.RateLimitError:
             sleep_time = random.choice([10.1, 21.1, 33.1, 47.1, 59.1, 63.1])
             print(f'Sleeping {sleep_time}s to avoid OpenAI rate limit')
             sleep(sleep_time)
         else:
             break
-    return [completion['text'] for completion in completions]
+    return [choice.text for choice in response.choices]
 
 
 def generate_completions_from_target_lm(
@@ -139,7 +143,7 @@ def generate_completions_from_target_lm(
     batch_size = 512
     continuations_per_prompt = 512
     if bad_words_ids is not None:
-        bad_words_ids = eval(bad_words_ids)
+        bad_words_ids = ast.literal_eval(bad_words_ids)
     output = target_lm(
         candidates,
         prefix=target_lm.tokenizer.bos_token + prefix,
@@ -177,73 +181,79 @@ def run(args: argparse.Namespace):
     target_lm = pipeline("text-generation", model=args.target_lm, device=0)
     scorer = SCORERS[args.task]()
     for _ in range(args.num_trials):
-        wandb.init(project="apo_red_teaming", entity="tomekkorbak", group=args.group_name, config=args)
-        prompt_pool = PromptPool.from_file(path=args.initial_prompt_pool, temperature=args.pool_temperature)
-        local_prompt_pool = PromptPool(prompts={})
-        for i in range(args.num_rounds):
-            local_prompt_pool.clear()
-            print(f'Round {i+1}, prompt pool size: {len(prompt_pool)}')
-            few_shot_examples = prompt_pool.sample(k=4)
-            red_lm_prompt = construct_prompt_for_red_lm(
-                few_shot_examples=few_shot_examples,
-                prompt_template=RED_LM_PROMPT_TEMPLATES[args.task],
-                task=args.task
-            )
-            responses = get_candidates_from_red_lm(
-                red_lm_prompt,
-                n=args.gpt3_num_responses,
-                top_p=args.gpt3_top_p,
-                temperature=args.gpt3_temperature
-            )
-            print('---')
-            print(red_lm_prompt)
-            print('---')
-            candidates = sum([parse_response(num_examples_to_extract=1, response=response, task=args.task)
-                              for response in responses], [])
-            target_lm_output = generate_completions_from_target_lm(
-                target_lm,
-                candidates,
-                prefix=args.prefix,
-                bad_words_ids=args.bad_words_ids
-            )
-            for candidate_prompt_text, completions in target_lm_output.items():
-                if args.task == 'pep8':
-                    scores = scorer.score_texts([candidate_prompt_text+completion for completion in completions])
-                else:
-                    scores = scorer.score_texts(completions)
-                candidate_prompt = CandidatePrompt(
-                    text=candidate_prompt_text,
-                    scores=scores,
-                    own_score=scorer.score_text(candidate_prompt_text),
+        experiment = comet_ml.OfflineExperiment(
+            project_name='apo-red-teaming',
+            offline_directory='./comet_logs',
+        )
+        experiment.log_parameters(vars(args))
+        try:
+            prompt_pool = PromptPool.from_file(path=args.initial_prompt_pool, temperature=args.pool_temperature)
+            local_prompt_pool = PromptPool(prompts={})
+            for i in range(args.num_rounds):
+                local_prompt_pool.clear()
+                print(f'Round {i+1}, prompt pool size: {len(prompt_pool)}')
+                few_shot_examples = prompt_pool.sample(k=4)
+                red_lm_prompt = construct_prompt_for_red_lm(
+                    few_shot_examples=few_shot_examples,
+                    prompt_template=RED_LM_PROMPT_TEMPLATES[args.task],
+                    task=args.task
                 )
-                print(candidate_prompt)
-                prompt_pool.add(candidate_prompt)
-                local_prompt_pool.add(candidate_prompt)
-            print(f'Best global prompt: {prompt_pool.current_best()[0]}')
-            print(f'Best prompt this round: {local_prompt_pool.current_best()[0]}')
-            print(f'Global average score: {prompt_pool.current_mean():.4f}')
-            print(f'Round average score: {local_prompt_pool.current_mean():.4f}')
-            print('='*20)
-            best_prompt_table = wandb.Table(
-                    data=[(prompt.text, prompt.mean(), prompt.std(), prompt.own_score)
-                          for prompt in prompt_pool.current_best(n=10)],
+                responses = get_candidates_from_red_lm(
+                    red_lm_prompt,
+                    n=args.gpt3_num_responses,
+                    top_p=args.gpt3_top_p,
+                    temperature=args.gpt3_temperature
+                )
+                print('---')
+                print(red_lm_prompt)
+                print('---')
+                candidates = sum([parse_response(num_examples_to_extract=1, response=response, task=args.task)
+                                  for response in responses], [])
+                target_lm_output = generate_completions_from_target_lm(
+                    target_lm,
+                    candidates,
+                    prefix=args.prefix,
+                    bad_words_ids=args.bad_words_ids
+                )
+                for candidate_prompt_text, completions in target_lm_output.items():
+                    if args.task == 'pep8':
+                        scores = scorer.score_texts([candidate_prompt_text+completion for completion in completions])
+                    else:
+                        scores = scorer.score_texts(completions)
+                    candidate_prompt = CandidatePrompt(
+                        text=candidate_prompt_text,
+                        scores=scores,
+                        own_score=scorer.score_text(candidate_prompt_text),
+                    )
+                    print(candidate_prompt)
+                    prompt_pool.add(candidate_prompt)
+                    local_prompt_pool.add(candidate_prompt)
+                print(f'Best global prompt: {prompt_pool.current_best()[0]}')
+                print(f'Best prompt this round: {local_prompt_pool.current_best()[0]}')
+                print(f'Global average score: {prompt_pool.current_mean():.4f}')
+                print(f'Round average score: {local_prompt_pool.current_mean():.4f}')
+                print('='*20)
+                best_prompts_df = pd.DataFrame(
+                    [(prompt.text, prompt.mean(), prompt.std(), prompt.own_score)
+                     for prompt in prompt_pool.current_best(n=10)],
                     columns=['text', 'mean score', 'std', 'own score']
                 )
-            wandb.log({
-                'best_prompt': best_prompt_table,
-                'best_prompts_scatter': wandb.plot.scatter(best_prompt_table, 'mean score', 'own score'),
-                'target_lm_responses': wandb.Table(
-                    data=[(prompt, responses[:3]) for prompt, responses in target_lm_output.items()][:10],
+                experiment.log_table('best_prompts.csv', tabular_data=best_prompts_df)
+                responses_df = pd.DataFrame(
+                    [(prompt, str(resps[:3])) for prompt, resps in target_lm_output.items()][:10],
                     columns=['prompt', 'response']
-                ),
-                'best_prompt_score': prompt_pool.current_best()[0].mean(),
-                'best_10_prompt_score': sum(p.mean() for p in prompt_pool.current_best(n=10))/10,
-                'best_100_prompt_score': sum(p.mean() for p in prompt_pool.current_best(n=100)) / 100,
-                'average_score': prompt_pool.current_mean(),
-                'round_best_prompt_score': local_prompt_pool.current_best()[0].mean(),
-                'round_average_score': local_prompt_pool.current_mean(),
-            })
-        wandb.finish()
+                )
+                experiment.log_table('target_lm_responses.csv', tabular_data=responses_df)
+                experiment.log_metrics({
+                    'best_prompt_score': prompt_pool.current_best()[0].mean(),
+                    'best_10_prompt_score': sum(p.mean() for p in prompt_pool.current_best(n=10))/10,
+                    'best_100_prompt_score': sum(p.mean() for p in prompt_pool.current_best(n=100)) / 100,
+                    'average_score': prompt_pool.current_mean(),
+                    'round_best_prompt_score': local_prompt_pool.current_best()[0].mean(),
+                    'round_average_score': local_prompt_pool.current_mean(),
+                }, step=i)
+        finally:
+            experiment.end()
 
 
 if __name__ == '__main__':
