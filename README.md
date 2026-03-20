@@ -72,6 +72,43 @@ python train.py \
   --override training.max_steps=500 training.learning_rate=0.0001 training.per_device_train_batch_size=4
 ```
 
+### Reproducing the Jupyter A100 run for PII
+
+The PII run used for our experiments was launched from a Jupyter notebook instead of the CLI, because the target GPU environment was only accessible using Jupyter. The training pipeline itself was unchanged: the same config merge logic and the same `train(...)` entrypoint were used.
+
+Base configs:
+- `configs/pii/pretrain.yml`
+- `configs/pii/conditional.yml`
+
+Additional runtime overrides applied on top of the YAML configs:
+
+```text
+generation.run_on_train_start=False
+generation.run_on_train_end=False
+training.per_device_train_batch_size=32
+training.effective_batch_size=64
+training.bf16=True
+training.fp16=False
+training.save_total_limit=4
+training.save_steps=10000
+```
+
+Equivalent CLI form:
+```
+python train.py \
+  --task configs/pii/pretrain.yml \
+  --method configs/pii/conditional.yml \
+  --override \
+    generation.run_on_train_start=False \
+    generation.run_on_train_end=False \
+    training.per_device_train_batch_size=32 \
+    training.effective_batch_size=64 \
+    training.bf16=True \
+    training.fp16=False \
+    training.save_total_limit=4 \
+    training.save_steps=10000
+```
+
 ## Tasks
 
 | Name | Config files | Training data | Scorer | Description |

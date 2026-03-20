@@ -1,11 +1,18 @@
 import os
-from typing import Any, Optional
-import argparse
 
-import torch
-from transformers import AutoConfig, AutoTokenizer, TrainingArguments, PreTrainedModel, PreTrainedTokenizer, set_seed
-import comet_ml
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
+os.environ.setdefault("COMET_MODE", "online")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
+from typing import Any, Optional
 import yaml
+import torch
+import comet_ml
+from transformers import AutoConfig, AutoTokenizer, TrainingArguments, PreTrainedModel, PreTrainedTokenizer, set_seed
+
+import argparse
 
 from apo.dataset_wrappers import ConstantLengthDataset
 from apo.trainer import CustomObjectiveTrainer, ModelInputInspector
@@ -49,7 +56,7 @@ def prepare_model(
         num_original_tokens = model.lm_head.weight.size(0)
         # Trick need to avoid initializing new embeddings to large values that'd cause oversampling
         # See https://nlp.stanford.edu//~johnhew//vocab-expansion.html
-        model.resize_token_embeddings(num_original_tokens+num_additional_tokens)
+        model.resize_token_embeddings(num_original_tokens + num_additional_tokens)
         pre_expansion_embedding_mean = model.lm_head.weight.data[:num_original_tokens].mean(dim=0)
         noise = torch.randn_like(model.lm_head.weight.data[num_original_tokens:])
         model.lm_head.weight.data[num_original_tokens:] = pre_expansion_embedding_mean + noise * 0.01
@@ -64,11 +71,12 @@ def prepare_trainer_arguments(**kwargs) -> TrainingArguments:
     num_tokens = kwargs.pop('num_tokens', None)
     effective_batch_size = kwargs.pop('effective_batch_size', None)
     tokens_already_seen = kwargs.pop('tokens_already_seen', 0)
-    explicit_max_steps = kwargs.get('max_steps')  # capture before TrainingArguments consumes it
+    explicit_max_steps = kwargs.get('max_steps')  
     args = TrainingArguments(report_to=['none'], **kwargs)
     if effective_batch_size:
         if args.world_size <= 1:
-            instantaneous_bsz = (args.per_device_train_batch_size * args.world_size * args.n_gpu)
+            n_gpu_safe = max(1, args.n_gpu)
+            instantaneous_bsz = (args.per_device_train_batch_size * args.world_size * n_gpu_safe)
             args.gradient_accumulation_steps = int(effective_batch_size // instantaneous_bsz)
             print(f'setting gradient_accumulation_steps={args.gradient_accumulation_steps} based on '
                   f'effective_batch_size={effective_batch_size} and instantaneous_bsz={instantaneous_bsz} '
@@ -77,6 +85,7 @@ def prepare_trainer_arguments(**kwargs) -> TrainingArguments:
                 raise ValueError("effective_batch_size is incompatible with per_device_train_batch_size and world_size")
         else:
             raise ValueError('effective_batch_size is not compatible with DDP')
+            
     if num_tokens:
         num_tokens -= tokens_already_seen
         computed_max_steps = int(num_tokens // (effective_batch_size * args.world_size * 1024))
@@ -138,7 +147,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--run_name', type=str, help='Comet ML experiment name', default=None)
     parser.add_argument('--group_name', type=str, help='Comet ML experiment group', default=None)
-    parser.add_argument('--tags', nargs='+', help='Comet ML tags',  default=[])
+    parser.add_argument('--tags', nargs='+', help='Comet ML tags', default=[])
     parser.add_argument('--task', type=str, help='a path to a YAML file with task configuration')
     parser.add_argument('--method', type=str, help='a path to a YAML file with method configuration')
     parser.add_argument('--checkpoint_path', type=str, help='a path to checkpoint to resume training', default=None)
@@ -150,12 +159,14 @@ if __name__ == '__main__':
     config = dict(merge_configs(task_config, method_config))
     if args.override:  # override YAML config from command-line
         override_config(config, params_to_override=args.override)
-    experiment = comet_ml.OfflineExperiment(
+    experiment = comet_ml.Experiment(
         project_name='pretraining-with-human-feedback',
-        offline_directory='./comet_logs'
+        # offline_directory='./comet_logs'
     )
     if args.run_name:
         experiment.set_name(args.run_name)
+    if args.group_name:
+        experiment.add_tag(f'group:{args.group_name}')
     if args.tags:
         experiment.add_tags(args.tags)
     experiment.log_parameters(config)
